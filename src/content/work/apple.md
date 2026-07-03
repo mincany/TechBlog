@@ -1,8 +1,8 @@
 ---
 company: "Apple"
-role: "Software Engineer"
-dateStart: "01/01/2020"
-dateEnd: "11/27/2022"
+role: "Software Engineer Intern — Strategic Data Solutions"
+dateStart: "05/01/2021"
+dateEnd: "12/31/2021"
 ---
 
-Voluptatem est quaerat voluptas praesentium ipsa dolorem dignissimos nulla ratione distinctio quae maiores eligendi nostrum? Quibusdam, debitis voluptatum, lorem ipsum dolor. Sit amet consectetur adipisicing elit. Iure illo neque tempora.
+Backend development in Apple's Strategic Data Solutions group.

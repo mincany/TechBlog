@@ -1,0 +1,86 @@
+---
+import Container from "@components/Container.astro";
+import PageLayout from "@layouts/PageLayout.astro";
+import Link from "@components/Link.astro";
+---
+
+<PageLayout title="About" description="About Mincan Yang">
+  <Container>
+    <div class="space-y-10">
+      <section class="animate space-y-4">
+        <h4 class="font-semibold text-black dark:text-white">
+          About Me
+        </h4>
+        <article class="space-y-4">
+          <p>
+            I'm a software engineer with 4+ years of experience building 
+            AI infrastructure at AWS. My focus is the <strong>capacity layer</strong> — 
+            the systems that manage how GPU resources get reserved, scheduled, and 
+            delivered to ML workloads at cloud scale.
+          </p>
+          <p>
+            I build distributed workflow orchestration for products like 
+            Capacity Blocks for ML (reserved GPU scheduling for training jobs) and 
+            UltraServers (multi-instance GPU supercomputers connected via high-bandwidth 
+            accelerator interconnects for trillion-parameter model training). 
+            The problems I work on daily involve state machines, idempotency in 
+            long-running workflows, capacity reservation lifecycle management, 
+            and the interface between capacity planning and workload scheduling.
+          </p>
+          <p>
+            Before AWS, I interned at Apple working on strategic data infrastructure.
+          </p>
+          <p>
+            I studied Computer Science and Mathematics at Boston University (BA, 2020), 
+            then Entertainment Technology at Carnegie Mellon University (MS, 2022).
+          </p>
+        </article>
+      </section>
+
+      <section class="animate space-y-4">
+        <h4 class="font-semibold text-black dark:text-white">
+          This Blog
+        </h4>
+        <article class="space-y-4">
+          <p>
+            I write about the infrastructure that makes large-scale AI possible:
+          </p>
+          <ul class="list-disc list-inside space-y-1">
+            <li>GPU scheduling in Kubernetes (DRA, topology-aware placement, Karpenter)</li>
+            <li>Capacity planning and reservation systems for AI workloads</li>
+            <li>Distributed systems patterns (idempotency, workflow orchestration, state machines)</li>
+            <li>The scheduling–capacity interface: how cluster schedulers and capacity planners should talk to each other</li>
+          </ul>
+          <p>
+            Posts are bilingual (中文/English). Deep technical dives tend to be in English; 
+            industry commentary and career reflections often in Chinese.
+          </p>
+        </article>
+      </section>
+
+      <section class="animate space-y-4">
+        <h4 class="font-semibold text-black dark:text-white">
+          Beyond Work
+        </h4>
+        <article class="space-y-4">
+          <p>
+            I host a Chinese-language podcast (杨思特的半熟电台) interviewing 
+            ordinary people with extraordinary stories. Topics range from LGBTQ+ identity 
+            to overseas Chinese work culture to the entertainment industry.
+          </p>
+        </article>
+      </section>
+
+      <section class="animate space-y-4">
+        <h4 class="font-semibold text-black dark:text-white">
+          Contact
+        </h4>
+        <p>
+          Best way to reach me: 
+          <Link href="https://www.linkedin.com/in/mincan-yang/" external>LinkedIn</Link>
+          or email at mincan.yang@outlook.com.
+        </p>
+      </section>
+    </div>
+  </Container>
+</PageLayout>

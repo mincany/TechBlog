@@ -1,0 +1,126 @@
+---
+import { getCollection } from "astro:content";
+import Container from "@components/Container.astro";
+import PageLayout from "@layouts/PageLayout.astro";
+import ArrowCard from "@components/ArrowCard.astro";
+import Link from "@components/Link.astro";
+import { dateRange } from "@lib/utils";
+import { SITE } from "@consts";
+
+const blog = (await getCollection("blog"))
+  .filter(post => !post.data.draft)
+  .sort((a, b) => b.data.date.valueOf() - a.data.date.valueOf())
+  .slice(0, 3);
+
+const allwork = (await getCollection("work"))
+  .sort((a, b) => new Date(b.data.dateStart).valueOf() - new Date(a.data.dateStart).valueOf())
+  .slice(0, 3);
+
+const work = await Promise.all(
+  allwork.map(async (item) => {
+    const { Content } = await item.render();
+    return { ...item, Content };
+  })
+);
+---
+
+<PageLayout title="首页" description="AI 基础设施工程师，专注 GPU 调度与容量管理系统">
+  <Container>
+    <h4 class="animate font-semibold text-black dark:text-white">
+      你好，我是 Mincan <span class="text-xl">👋🏻</span>
+    </h4>
+    <div class="space-y-16">
+      <section>
+        <article class="space-y-4">
+          <p class="animate">
+            我是一名有 <strong>4年以上经验</strong> 的软件工程师，专注于
+            <strong>AI 基础设施</strong> — 在 AWS 构建 GPU 资源预留、调度和交付的容量管理层。
+          </p>
+          <p class="animate">
+            我负责 Capacity Blocks for ML（ML 训练的 GPU 预留调度）和 
+            UltraServers（通过高带宽加速器互连将多台实例组成超级计算节点，
+            用于万亿参数模型训练）等产品背后的系统。日常工作涉及分布式工作流编排、
+            容量预留生命周期管理、以及大规模资源调度的幂等状态机设计。
+          </p>
+          <p class="animate">
+            在 AWS 之前，我在 Apple 实习做数据基础设施，
+            也在 Boston University Department of Medicine 做过 ML 研究。
+            本科在波士顿大学学 CS 和数学，研究生在 CMU 学 Entertainment Technology。
+          </p>
+          <p class="animate">
+            这个博客记录我在 GPU 调度、AI 工作负载容量规划、分布式系统模式等方面的学习和思考。
+            中英双语，取决于话题。
+          </p>
+        </article>
+      </section>
+
+      <section class="animate space-y-6">
+        <div class="flex flex-wrap gap-y-2 items-center justify-between">
+          <h5 class="font-semibold text-black dark:text-white">
+            最新文章
+          </h5>
+          <Link href="/zh/blog">
+            查看全部
+          </Link>
+        </div>
+        <ul class="flex flex-col gap-4">
+          {blog.map(post => (
+            <li>
+              <ArrowCard entry={post} />
+            </li>
+          ))}
+        </ul>
+      </section>
+
+      <section class="animate space-y-6">
+        <div class="flex flex-wrap gap-y-2 items-center justify-between">
+          <h5 class="font-semibold text-black dark:text-white">
+            工作经历
+          </h5>
+        </div>
+        <ul class="flex flex-col space-y-4">
+          {work.map(entry => (
+            <li>
+              <div class="text-sm opacity-75">
+                {dateRange(entry.data.dateStart, entry.data.dateEnd)}
+              </div>
+              <div class="font-semibold text-black dark:text-white">
+                {entry.data.company}
+              </div>
+              <div class="text-sm opacity-75">
+                {entry.data.role}
+              </div>
+              <article>
+                <entry.Content />
+              </article>
+            </li>
+          ))}
+        </ul>
+      </section>
+
+      <section class="animate space-y-4">
+        <h5 class="font-semibold text-black dark:text-white">
+          联系我
+        </h5>
+        <article>
+          <p>
+            对 AI 基础设施、GPU 调度或分布式系统感兴趣？欢迎通过 LinkedIn 或邮件联系。
+          </p>
+        </article>
+        <ul class="flex flex-wrap gap-2">
+          <li class="flex gap-x-2 text-nowrap">
+            <Link href="https://www.linkedin.com/in/mincan-yang/" external>
+              linkedin
+            </Link>
+            {"/"}
+          </li>
+          <li class="line-clamp-1">
+            <Link href="mailto:mincan.yang@outlook.com">
+              mincan.yang@outlook.com
+            </Link>
+          </li>
+        </ul>
+      </section>
+    </div>
+  </Container>
+</PageLayout>

@@ -7,7 +7,7 @@ import { readingTime } from "@lib/utils";
 import BackToPrev from "@components/BackToPrev.astro";
 
 export async function getStaticPaths() {
-  const posts = (await getCollection("blog"))
+  const posts = (await getCollection("blogZh"))
     .filter(post => !post.data.draft)
     .sort((a, b) => b.data.date.valueOf() - a.data.date.valueOf());
   return posts.map((post) => ({
@@ -15,7 +15,7 @@ export async function getStaticPaths() {
     props: post,
   }));
 }
-type Props = CollectionEntry<"blog">;
+type Props = CollectionEntry<"blogZh">;
 
 const post = Astro.props;
 const { Content } = await post.render();
@@ -24,8 +24,8 @@ const { Content } = await post.render();
 <PageLayout title={post.data.title} description={post.data.description}>
   <Container>
     <div class="animate">
-      <BackToPrev href="/blog">
-        Back to blog
+      <BackToPrev href="/zh/blog">
+        返回博客
       </BackToPrev>
     </div>
     <div class="space-y-1 my-10">
@@ -95,15 +95,15 @@ const { Content } = await post.render();
         var btn = document.createElement("button");
         btn.type = "button";
         btn.className = "code-copy-btn";
-        btn.textContent = "Copy";
+        btn.textContent = "复制";
         btn.addEventListener("click", function () {
           var code = pre.querySelector("code");
           var text = code ? code.innerText : pre.innerText;
           navigator.clipboard.writeText(text).then(function () {
-            btn.textContent = "Copied";
+            btn.textContent = "已复制";
             btn.classList.add("copied");
             setTimeout(function () {
-              btn.textContent = "Copy";
+              btn.textContent = "复制";
               btn.classList.remove("copied");
             }, 1500);
           });

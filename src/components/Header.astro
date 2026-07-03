@@ -2,32 +2,38 @@
 import Container from "@components/Container.astro";
 import Link from "@components/Link.astro";
 import { SITE } from "@consts";
+
+// Detect current language from URL
+const currentPath = Astro.url.pathname;
+const isZh = currentPath.startsWith('/zh');
+const pathWithoutLang = currentPath.replace(/^\/zh/, '') || '/';
+const enPath = pathWithoutLang;
+const zhPath = `/zh${pathWithoutLang}`;
 ---
 
 <header>
   <Container>
     <div class="flex flex-wrap gap-y-2 justify-between">
-      <Link href="/" underline={false}>
+      <Link href={isZh ? "/zh" : "/"} underline={false}>
         <div class="font-semibold">
           {SITE.NAME}
         </div>
       </Link>
-      <nav class="flex gap-1">
-        <Link href="/blog">
+      <nav class="flex gap-1 items-center">
+        <Link href={isZh ? "/zh/blog" : "/blog"}>
           blog
         </Link>
-        <span>
-          {`/`}
-        </span>
-        <Link href="/work">
-          work
+        <span>/</span>
+        <Link href={isZh ? "/zh/about" : "/about"}>
+          about
         </Link>
-        <span>
-          {`/`}
-        </span>
-        <Link href="/projects">
-          projects
-        </Link>
+        <span class="ml-3 text-sm opacity-60">|</span>
+        <a
+          href={isZh ? enPath : zhPath}
+          class="ml-2 text-sm px-2 py-0.5 rounded border border-current opacity-70 hover:opacity-100 transition-opacity"
+        >
+          {isZh ? 'EN' : '中文'}
+        </a>
       </nav>
     </div>
   </Container>
