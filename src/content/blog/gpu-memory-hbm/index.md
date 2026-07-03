@@ -23,11 +23,11 @@ The concept that ties bandwidth to speed is **arithmetic intensity**: how much m
 
 ## Three examples on one chip
 
-All three use a single H100 (80 GB HBM, ~3.35 TB/s bandwidth, ~990 BF16 TFLOPS). Numbers are rounded, using the standard ≈2×params FLOPs-per-token heuristic.
+All three use one of the p5.48xlarge's H100s (80 GB HBM, ~3.35 TB/s bandwidth, ~990 BF16 TFLOPS). Numbers are rounded, using the standard ≈2×params FLOPs-per-token heuristic.
 
 ### 1. Capacity-bound — "it doesn't even fit"
 
-Serving Llama-70B in FP16 on one H100. Weights alone are 70B × 2 bytes = **140 GB** — already larger than the 80 GB on the card. It won't load. FLOPs and bandwidth never enter the conversation; you're forced to shard the model across ≥2 GPUs (which drags in the interconnect — 1.4/1.5).
+Serving Llama-70B in FP16 on one H100. Weights alone are 70B × 2 bytes = **140 GB** — already larger than the 80 GB on the card. It won't load. FLOPs and bandwidth never enter the conversation; you're forced to shard the model across ≥2 GPUs (which drags in the fabric — 1.3 and 1.5).
 
 Training is hungrier still. A full fine-tune has to hold weights + gradients + an FP32 master copy + the optimizer's two moment buffers — roughly **16 bytes per parameter**. For 70B that's ~1,120 GB, or about 14 H100s' worth of memory *just to hold the job before any compute happens.*
 
@@ -70,10 +70,10 @@ Back to 1.1: the spec-sheet TFLOPs is the most the chip *could* do. Example 2 sh
 ## What it means downstream
 
 - **Capacity → unit count.** "Does it fit" decides how many GPUs a job needs, which becomes a gang-scheduling constraint later (Part 3).
-- **Doesn't fit → units must talk.** Sharding a model across GPUs makes the interconnect a first-class concern — the next two posts (1.4 intra-node, 1.5 inter-node).
+- **Doesn't fit → units must talk.** Sharding a model across GPUs makes the fabric a first-class concern — 1.3 (intra-node) and 1.5 (inter-node).
 - **The honest number.** How close you actually run to the compute ceiling has a name — MFU — and memory-boundedness is a big reason it's often low (6.1).
 
-Next: **1.3 — The host around the accelerator.** Even when compute and memory are fine, the CPU, system RAM, and local disk feeding the GPU can quietly starve it.
+Next: **1.3 — Intra-Node Fabric.** When a model outgrows one GPU (example 1), the links between the GPUs inside the box decide how fast they can split the work.
 
 ---
 

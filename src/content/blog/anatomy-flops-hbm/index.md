@@ -4,7 +4,9 @@ description: "This post is only about one thing inside the accelerator: its abil
 date: "07/01/2026"
 ---
 
-This is the first anatomy post — we crack open the "unit" that 0.1 treated as a black box. A unit of compute has a few distinct parts (compute, memory, the host around it, the interconnect between units), and this post is about exactly one of them: **the chip's ability to calculate.** Memory is 1.2, the host is 1.3, the fabric is 1.4–1.5. Keep this narrow scope in mind — it matters for the punchline at the end.
+This is the first anatomy post — we crack open the "unit" that 0.1 treated as a black box. A unit of compute has a few distinct parts (compute, memory, the host around it, the fabric between units — the interconnect that wires components into a network, like NVLink), and this post is about exactly one of them: **the chip's ability to calculate.** Memory is 1.2, the in-box NVLink fabric is 1.3, the host around it is 1.4, and the network beyond the box is 1.5. Keep this narrow scope in mind — it matters for the punchline at the end.
+
+Throughout Part 1 I use one concrete box as the running example: a **p5.48xlarge** — 8× NVIDIA H100. It was the first AI-dedicated instance I worked on, so it's the hardware I know best; its numbers (the H100's FLOPs and HBM here, then NVLink and PCIe in later posts) ground every example.
 
 ## TL;DR
 
@@ -37,7 +39,7 @@ The trade is simple: **fewer bits per number → the chip can push more of them 
 
 ## One chip, many numbers
 
-Here's a single H100 (SXM), reading its own public datasheet, peak tensor-core throughput:
+Here's one of the p5.48xlarge's H100s (SXM), reading its own public datasheet, peak tensor-core throughput:
 
 | How you count | FLOPS (same chip) |
 |---|---|
