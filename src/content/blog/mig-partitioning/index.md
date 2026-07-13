@@ -1,6 +1,6 @@
 ---
 title: "2.2 · Hard Partitions: MIG"
-description: "Carve one physical H100 into isolated instances so two workloads run at once on a card a single job would hog — a step-by-step p5.48xlarge demo, then the rigidity cost."
+description: "Carve one physical H100 into isolated instances so two workloads run at once on a card a single job would hog — a step-by-step MIG demo, then the rigidity cost."
 date: "07/03/2026"
 ---
 
@@ -52,25 +52,26 @@ Take the scenario from 2.1: a 13B BF16 model (26 GB weights) doing batch-1 decod
 
 Configure that H100 as two `3g.40gb` instances and each tenant gets 40 GB + 3/7 of the SMs (~424 BF16 TFLOPS nominal) + its own bandwidth path. The 13B model fits in 40 GB with room left for KV cache, so two independent serving replicas run on one card with zero cross-talk. The win: **two tenants on one H100 instead of two H100s each at <35% utilization** — half the hardware for the same served work. Across a full p5.48xlarge that's 16 isolated serving slots on 8 cards.
 
-The rest of this post runs exactly that on a real p5.48xlarge, so you can watch both tenants make progress at the same time — then shows where the hard partition costs you.
+The rest of this post runs exactly that on a real GPU, so you can watch both tenants make progress at the same time — then shows where the hard partition costs you.
 
 ## Demo: two workloads at once on one physical GPU
 
-*Output blocks below are illustrative and will be replaced with a verbatim capture from a real p5.48xlarge run — don't treat the numbers as measured yet.*
+*The demo runs on a **p4d.24xlarge** (8× A100 40 GB) — slightly smaller HBM and fewer/slower SMs than the p5's H100, but the same MIG architecture, so the mechanism is identical and only the slice sizes scale down (`3g.40gb` → `3g.20gb`). Output blocks are illustrative and will be replaced with a verbatim capture from a real run — don't treat the numbers as measured yet.*
 
 **What this proves, in order:** GPU 0 of the eight first runs a single job that leaves most of the card idle (the problem), then — split into two MIG instances — runs two independent jobs at the same time, each on its own isolated slice (the win), and finally rejects an illegal re-partition (the cost).
 
-**Where everything runs:** every command runs in an SSH shell on the p5.48xlarge instance itself. `nvidia-smi` runs on the instance, not on your laptop.
+**Where everything runs:** every command runs in an SSH shell on the p4d.24xlarge instance itself. `nvidia-smi` runs on the instance, not on your laptop.
 
 ### Prerequisites — getting the GPU
 
-1. **Reserve the capacity.** A `p5.48xlarge` is 8× H100 80 GB. p5 capacity is scarce, so you reserve it up front — either a **Capacity Block for ML** (a fixed-duration reservation you request for a start date) or an **On-Demand Capacity Reservation**. Both are standard EC2 features; once the reservation is active you launch into it.
-2. **Launch one `p5.48xlarge` from the reservation** using the **Deep Learning AMI (Ubuntu)** — it ships the NVIDIA driver, CUDA, and PyTorch, so there's nothing to install. Console: EC2 → Launch instance → Deep Learning AMI, instance type `p5.48xlarge`, and select your capacity reservation. CLI equivalent: `aws ec2 run-instances --instance-type p5.48xlarge --image-id <dlami-id> --capacity-reservation-specification CapacityReservationTarget={CapacityReservationId=<cr-id>} ...`.
+1. **Get the capacity.** A `p4d.24xlarge` is 8× A100 40 GB. You can launch it On-Demand in most regions, or reserve it up front with an **On-Demand Capacity Reservation** or **Capacity Block for ML** if capacity is tight. (On a p5 this same demo uses H100s — the only change is the smaller A100 slice sizes.)
+2. **Launch one `p4d.24xlarge`** using the **Deep Learning AMI (Ubuntu)** — it ships the NVIDIA driver, CUDA, and PyTorch, so there's nothing to install. Console: EC2 → Launch instance → Deep Learning AMI, instance type `p4d.24xlarge`. CLI equivalent: `aws ec2 run-instances --instance-type p4d.24xlarge --image-id <dlami-id> ...`.
 3. **SSH in:** `ssh -i your-key.pem ubuntu@<instance-public-ip>`. Every command below runs in this shell.
-4. **Save the workload** on the instance as `~/workload.py` — a tiny memory-bound loop (like batch-1 decode) that streams weights from HBM each step and prints throughput so progress is visible:
+4. **Create the workload** — paste this as-is to write `~/workload.py` (a tiny memory-bound loop, like batch-1 decode, that streams weights from HBM each step and prints throughput so progress is visible):
 
-```python
-# ~/workload.py — memory-bound "decode" loop; prints it/s so progress is visible
+```bash
+cat > ~/workload.py <<'PY'
+# memory-bound "decode" loop; prints it/s so progress is visible
 import torch, time, argparse
 p = argparse.ArgumentParser()
 p.add_argument("--name", default="job")
@@ -86,11 +87,12 @@ while True:
     step += 1
     if step % 50 == 0:
         print(f"[{a.name}] step {step}  {step/(time.time()-t0):.1f} it/s", flush=True)
+PY
 ```
 
 ### Step 0 — confirm the starting state
 
-**Why:** establish that GPU 0 is a whole, un-partitioned H100 before we touch it.
+**Why:** establish that GPU 0 is a whole, un-partitioned A100 before we touch it.
 
 ```bash
 nvidia-smi --query-gpu=index,name,memory.total,mig.mode.current --format=csv
@@ -98,33 +100,33 @@ nvidia-smi --query-gpu=index,name,memory.total,mig.mode.current --format=csv
 
 ```
 index, name, memory.total [MiB], mig.mode.current
-0, NVIDIA H100 80GB HBM3, 81559 MiB, Disabled
-1, NVIDIA H100 80GB HBM3, 81559 MiB, Disabled
+0, NVIDIA A100-SXM4-40GB, 40960 MiB, Disabled
+1, NVIDIA A100-SXM4-40GB, 40960 MiB, Disabled
 ... (GPUs 2–7 identical)
 ```
 
-Eight H100s, MIG disabled on all. We use GPU 0.
+Eight A100s, MIG disabled on all. We use GPU 0.
 
 ### Step 1 — baseline: one job leaves most of the card idle
 
-**Why:** show the underutilization MIG exists to fix — one small job owning a whole 80 GB card.
+**Why:** show the underutilization MIG exists to fix — one small job owning a whole 40 GB card.
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 python3 ~/workload.py --name solo --gb 26 &
+CUDA_VISIBLE_DEVICES=0 python3 ~/workload.py --name solo --gb 12 &
 sleep 20
 nvidia-smi
 ```
 
 ```
-[solo] step 50  312.4 it/s
+[solo] step 50  512.9 it/s
 +-----------------------------------------------------------------------------+
-| GPU  Name        Memory-Usage          GPU-Util                             |
-|  0   H100 80GB    26312MiB / 81559MiB     ~34%                              |
-|      PID 5821  python3   26 GB                                             |
+| GPU  Name           Memory-Usage         GPU-Util                           |
+|  0   A100-SXM4-40GB   12180MiB / 40960MiB   ~30%                            |
+|      PID 5821  python3   12 GB                                             |
 +-----------------------------------------------------------------------------+
 ```
 
-One job, ~26 of 80 GB, roughly a third of the card — but GPU 0 now counts as "occupied," so a scheduler routes the next job elsewhere. Stop it before partitioning (MIG can only be enabled on an idle GPU):
+One job, ~12 of 40 GB, under a third of the card — but GPU 0 now counts as "occupied," so a scheduler routes the next job elsewhere. Stop it before partitioning (MIG can only be enabled on an idle GPU):
 
 ```bash
 kill %1
@@ -136,15 +138,15 @@ kill %1
 
 ```bash
 sudo nvidia-smi -i 0 -mig 1                        # enable MIG on GPU 0
-sudo nvidia-smi mig -i 0 -cgi 3g.40gb,3g.40gb -C   # create two 3g.40gb instances (+ compute instances)
+sudo nvidia-smi mig -i 0 -cgi 3g.20gb,3g.20gb -C   # create two 3g.20gb instances (+ compute instances)
 nvidia-smi -L
 ```
 
 ```
-GPU 0: NVIDIA H100 80GB HBM3 (UUID: GPU-1a2b...)
-  MIG 3g.40gb  Device 0: (UUID: MIG-aaaa1111-...)
-  MIG 3g.40gb  Device 1: (UUID: MIG-bbbb2222-...)
-GPU 1: NVIDIA H100 80GB HBM3 (UUID: GPU-3c4d...)
+GPU 0: NVIDIA A100-SXM4-40GB (UUID: GPU-1a2b...)
+  MIG 3g.20gb  Device 0: (UUID: MIG-aaaa1111-...)
+  MIG 3g.20gb  Device 1: (UUID: MIG-bbbb2222-...)
+GPU 1: NVIDIA A100-SXM4-40GB (UUID: GPU-3c4d...)
 ...
 ```
 
@@ -157,23 +159,23 @@ GPU 0 is now two independent MIG devices, each with its own UUID. (If `-mig 1` r
 ```bash
 A=$(nvidia-smi -L | grep -oP 'MIG-[0-9a-f-]+' | sed -n 1p)
 B=$(nvidia-smi -L | grep -oP 'MIG-[0-9a-f-]+' | sed -n 2p)
-CUDA_VISIBLE_DEVICES=$A python3 ~/workload.py --name A --gb 20 &
-CUDA_VISIBLE_DEVICES=$B python3 ~/workload.py --name B --gb 20 &
+CUDA_VISIBLE_DEVICES=$A python3 ~/workload.py --name A --gb 15 &
+CUDA_VISIBLE_DEVICES=$B python3 ~/workload.py --name B --gb 15 &
 sleep 20
 nvidia-smi
 ```
 
 ```
-[A] step 50  188.7 it/s
-[B] step 50  187.9 it/s
+[A] step 50  268.4 it/s
+[B] step 50  267.6 it/s
 +-----------------------------------------------------------------------------+
 | GPU  GI  CI   Memory-Usage           Process                                |
-|  0    1   0    20180MiB / 40448MiB     PID 6142  python3  (job A)           |
-|  0    2   0    20180MiB / 40448MiB     PID 6143  python3  (job B)           |
+|  0    1   0    15140MiB / 20096MiB     PID 6142  python3  (job A)           |
+|  0    2   0    15140MiB / 20096MiB     PID 6143  python3  (job B)           |
 +-----------------------------------------------------------------------------+
 ```
 
-Two independent jobs, two PIDs, on two MIG devices of **one physical GPU** — both making progress at once. Where Step 1 served a single tenant on the whole card, GPU 0 now serves two, hardware-isolated: neither can touch the other's 40 GB or steal its SMs. That is the utilization win.
+Two independent jobs, two PIDs, on two MIG devices of **one physical GPU** — both making progress at once. Where Step 1 served a single tenant on the whole card, GPU 0 now serves two, hardware-isolated: neither can touch the other's 20 GB or steal its SMs. That is the utilization win.
 
 ### Step 4 — the cost: the layout is rigid
 
@@ -182,15 +184,17 @@ Two independent jobs, two PIDs, on two MIG devices of **one physical GPU** — b
 ```bash
 kill %1 %2
 sudo nvidia-smi mig -i 0 -dci && sudo nvidia-smi mig -i 0 -dgi   # tear down to change layout
-sudo nvidia-smi mig -i 0 -cgi 3g.40gb,3g.40gb,1g.10gb -C         # try an illegal geometry
+sudo nvidia-smi mig -i 0 -cgi 3g.20gb,3g.20gb,1g.5gb -C          # try an illegal geometry
 ```
 
 ```
-Unable to create a GPU instance on GPU 0 using profile 1g.10gb: Insufficient Resources
+Successfully created GPU instance ID 2 on GPU 0 using profile MIG 3g.20gb (ID 9)
+Successfully created GPU instance ID 1 on GPU 0 using profile MIG 3g.20gb (ID 9)
+Unable to create a GPU instance on GPU 0 using profile 1g.5gb: Insufficient Resources
 Failed to create GPU instances: Insufficient Resources
 ```
 
-Two `3g.40gb` slices already consume all 8 memory slices; adding a `1g.10gb` needs a 9th that doesn't exist. The geometry — not your workload — dictates what's legal, and changing it means draining and recreating. That rigidity is the price of the hard isolation.
+The two `3g.20gb` instances are created; the `1g.5gb` is refused. Here's why, restated from the top so you don't have to scroll back: MIG carves the card into a **fixed grid of 7 compute slices and 8 memory slices** (NVIDIA's MIG spec — the same on A100 and H100; only the per-slice size differs, and on the 40 GB A100 each memory slice is 40 / 8 = 5 GB). A `3g.20gb` instance claims 3 compute + 4 memory slices, so **two of them use 6 of 7 compute and all 8 of 8 memory**. The `1g.5gb` you asked for needs one more memory slice — a 9th — which doesn't exist, so it's rejected *even though a 7th compute slice is still free and idle*. The geometry, not your workload, decides what's legal; and to change the layout you must drain and recreate every instance (the `-dci`/`-dgi` above), not resize in place. That is the rigidity — the price you pay for the hard isolation Step 3 just bought you.
 
 ### Teardown
 

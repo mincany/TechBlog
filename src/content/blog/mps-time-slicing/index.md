@@ -1,6 +1,6 @@
 ---
 title: "2.3 · Soft Sharing: MPS and Time-Slicing"
-description: "Pack several sub-saturating jobs onto one GPU — MPS runs them truly concurrently, time-slicing rotates turns — with a step-by-step p5.48xlarge demo, then the shared-fault-domain cost."
+description: "Pack several sub-saturating jobs onto one GPU — MPS runs them truly concurrently, time-slicing rotates turns — with a step-by-step MPS-vs-time-slicing demo, then the shared-fault-domain cost."
 date: "07/04/2026"
 ---
 
@@ -65,18 +65,19 @@ Real serving does exactly that. Requests arrive in bursts; between them the SMs 
 
 ## Demo: MPS vs time-slicing on one GPU
 
-*Output blocks below are illustrative and will be replaced with a verbatim capture from a real p5.48xlarge run — don't treat the numbers as measured yet.*
+*The demo runs on a **p4d.24xlarge** (8× A100 40 GB) — slightly smaller HBM and fewer/slower SMs than the p5's H100, but MPS and time-slicing behave identically. Output blocks are illustrative and will be replaced with a verbatim capture from a real run — don't treat the numbers as measured yet.*
 
-**What this proves, in order:** on one whole H100, a single small job under-fills the GPU (headroom); two such jobs under default **time-slicing** serialize and take ~2× as long (the problem); the same two jobs under **MPS** run concurrently and finish in ~1× (the win); then a per-client SM cap and the shared-fault-domain cost (the trade). The worked example above showed the *bandwidth* face of this (memory-bound tenants sharing the bus); this demo shows the *compute* face (small kernels sharing the SMs) — same principle: a tenant that under-fills the GPU leaves room MPS packs another into.
+**What this proves, in order:** on one whole A100, a single small job under-fills the GPU (headroom); two such jobs under default **time-slicing** serialize and take ~2× as long (the problem); the same two jobs under **MPS** run concurrently and finish in ~1× (the win); then a per-client SM cap and the shared-fault-domain cost (the trade). The worked example above showed the *bandwidth* face of this (memory-bound tenants sharing the bus); this demo shows the *compute* face (small kernels sharing the SMs) — same principle: a tenant that under-fills the GPU leaves room MPS packs another into.
 
-**Where everything runs:** every command runs in an SSH shell on the p5.48xlarge. MPS uses a *whole* GPU, not a MIG slice — we use GPU 0 in normal mode (if you ran the 2.2 demo, disable MIG first: `sudo nvidia-smi -i 0 -mig 0`).
+**Where everything runs:** every command runs in an SSH shell on the p4d.24xlarge. MPS uses a *whole* GPU, not a MIG slice — we use GPU 0 in normal mode (if you ran the 2.2 demo, disable MIG first: `sudo nvidia-smi -i 0 -mig 0`).
 
 ### Prerequisites — getting the GPU
 
-Same as 2.2: reserve a `p5.48xlarge` (Capacity Block for ML or an On-Demand Capacity Reservation), launch it on the **Deep Learning AMI (Ubuntu)**, and `ssh -i your-key.pem ubuntu@<instance-public-ip>`. Every command below runs in that shell. Save this workload as `~/mps_work.py` — a fixed amount of compute (so wall-time is the metric) sized to *under-fill* the GPU, the regime where sharing helps:
+Same as 2.2: launch a `p4d.24xlarge` (On-Demand, or via a reservation if capacity is tight) on the **Deep Learning AMI (Ubuntu)**, and `ssh -i your-key.pem ubuntu@<instance-public-ip>`. Every command below runs in that shell. Create the workload — paste this as-is to write `~/mps_work.py` (a fixed amount of compute, so wall-time is the metric, sized to *under-fill* the GPU — the regime where sharing helps):
 
-```python
-# ~/mps_work.py — fixed compute; the matmul is small enough to leave SMs idle
+```bash
+cat > ~/mps_work.py <<'PY'
+# fixed compute; the matmul is small enough to leave SMs idle
 import torch, time, argparse
 p = argparse.ArgumentParser()
 p.add_argument("--name", default="job")
@@ -90,6 +91,7 @@ for _ in range(a.iters):
     Z = X @ Y
 torch.cuda.synchronize()
 print(f"[{a.name}] {a.iters} iters, size {a.size}: {time.time()-t0:.1f}s", flush=True)
+PY
 ```
 
 ### Step 0 — confirm a whole GPU, no MPS running
@@ -120,11 +122,11 @@ wait
 ```
 
 ```
-41 %
-[solo] 4000 iters, size 2048: 12.3s
+44 %
+[solo] 4000 iters, size 2048: 18.6s
 ```
 
-One job finishes in ~12 s and the GPU sits around ~40% — most of the card is idle. That idle headroom is what sharing reclaims.
+One job finishes in ~19 s and the GPU sits around ~45% — most of the card is idle. That idle headroom is what sharing reclaims.
 
 ### Step 2 — the problem: two jobs, default time-slicing
 
@@ -137,11 +139,11 @@ wait
 ```
 
 ```
-[A] 4000 iters, size 2048: 24.1s
-[B] 4000 iters, size 2048: 24.4s
+[A] 4000 iters, size 2048: 37.2s
+[B] 4000 iters, size 2048: 37.5s
 ```
 
-Both take ~2× the single-job time. The GPU time-slices between the two contexts — only one job's kernels run at any instant — so two jobs cost roughly twice one, even though each alone left ~60% of the SMs idle.
+Both take ~2× the single-job time. The GPU time-slices between the two contexts — only one job's kernels run at any instant — so two jobs cost roughly twice one, even though each alone left ~55% of the SMs idle.
 
 ### Step 3 — the win: two jobs under MPS
 
@@ -155,23 +157,34 @@ wait
 ```
 
 ```
-[A] 4000 iters, size 2048: 13.0s
-[B] 4000 iters, size 2048: 13.1s
+[A] 4000 iters, size 2048: 19.8s
+[B] 4000 iters, size 2048: 20.1s
 ```
 
-Both finish in ~13 s — barely more than a single job, and about **half** the time-sliced 24 s. The two under-filling jobs now overlap on the SMs one job left idle: two tenants' work done on one card in the wall-time of one. That is the win. Run `nvidia-smi` during the jobs (from a second SSH shell) and you'll see one `nvidia-cuda-mps-server` process holding the GPU, with both jobs funneled through it as clients.
+Both finish in ~20 s — barely more than a single job, and about **half** the time-sliced 37 s. The difference is serialize-vs-overlap: without MPS the GPU **time-slices** — it runs one process's kernels, pauses them, runs the other's, and the paused job's SMs sit idle, so two jobs cost ~2×. MPS merges both processes into one context, so their kernels occupy different SMs *at the same instant* — the SMs one job leaves idle are filled by the other, with no context-switch dead-time. That only works because each job under-fills the GPU; if one job already saturated every SM, MPS would have nothing to overlap and collapse back to time-slicing's ~2×. Run `nvidia-smi` during the jobs (from a second SSH shell) and you'll see one `nvidia-cuda-mps-server` process holding the GPU with both jobs funneled through it as clients.
 
-### Step 4 — the control lever, and the cost
+### Step 4 — the control lever (and the cost)
 
-**Why:** MPS gives a QoS knob, but no hardware isolation — the trade this whole post pays.
+**Why:** MPS lets you *bound* a tenant's share so one greedy job can't starve the rest — and it also exposes the thing MPS still can't give you: isolation.
 
-Cap a client to half the SMs (a ceiling, not a reservation):
+`CUDA_MPS_ACTIVE_THREAD_PERCENTAGE` caps a client to a fraction of the SMs — a ceiling, not a reservation (unused SMs aren't handed back). To see it bite, run the same job uncapped, then capped to 50%, with the MPS daemon still up from Step 3, and compare wall-time:
 
 ```bash
-CUDA_MPS_ACTIVE_THREAD_PERCENTAGE=50 CUDA_VISIBLE_DEVICES=0 python3 ~/mps_work.py --name capped &
+CUDA_VISIBLE_DEVICES=0 python3 ~/mps_work.py --name full > /tmp/full.log 2>&1
+CUDA_MPS_ACTIVE_THREAD_PERCENTAGE=50 CUDA_VISIBLE_DEVICES=0 python3 ~/mps_work.py --name half > /tmp/half.log 2>&1
+tail -1 /tmp/full.log /tmp/half.log
 ```
 
-The cap bounds a noisy tenant's SM share — but all clients still share one 80 GB address space and one fault domain: an OOM or a GPU fault in one client can starve or crash the shared MPS server and take the others down with it. That shared-fate question is 2.4.
+```
+==> /tmp/full.log <==
+[full] 4000 iters, size 2048: 18.4s
+==> /tmp/half.log <==
+[half] 4000 iters, size 2048: 34.9s
+```
+
+Half the SMs, roughly double the wall-time — the cap is real and MPS enforces it. That's the QoS lever: you can hand each tenant a guaranteed ceiling of compute.
+
+**The cost:** what MPS still doesn't give you is *isolation*. All clients share one 40 GB address space and one fault domain — a tenant that leaks memory until `cudaMalloc` fails, or triggers a GPU fault, can starve or crash the shared MPS server and take every co-tenant down with it. MIG's hard partition (2.2) prevented exactly that; MPS trades it away for flexibility. When that shared fate is acceptable — and when it isn't — is 2.4.
 
 ### Teardown
 

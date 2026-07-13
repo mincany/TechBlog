@@ -245,11 +245,13 @@ table, Part 2 wrap + Part 3 handoff.
 
 ## Final status
 
+**Demo hardware (2026-07-06):** the 2.2 + 2.3 *demo sections* are re-pointed to **p4d.24xlarge (A100 40 GB)** — cheaper/more available than p5, and MIG was introduced on A100 so the mechanism is identical. Changes confined to the demos: MIG `3g.40gb`→`3g.20gb`, card 80→40 GB, `--gb` trimmed (26→12 baseline, 20→15 per slice), illegal geometry `…,1g.10gb`→`…,1g.5gb`, MPS timings rescaled for the slower A100 SMs, one-liner "runs on p4d, same structure as p5" added to each demo. All reasoning / worked-example / TL;DR sections stay on the canonical **p5 / H100** numbers. Output still illustrative pending the real p4d run.
+
 | § | slug | title | state |
 |---|------|-------|-------|
 | 2.1 | gpu-sharing-problem | One GPU, Many Jobs: The Case for Sharing | 🔒 locked |
-| 2.2 | mig-partitioning | Hard Partitions: MIG | 🔓 unlocked — win-first demo added; pending real p5 capture + re-review |
-| 2.3 | mps-time-slicing | Soft Sharing: MPS and Time-Slicing | 🔓 unlocked — win-first demo added; pending real p5 capture + re-review |
+| 2.2 | mig-partitioning | Hard Partitions: MIG | 🔓 unlocked — win-first demo added; pending real p4d/A100 capture + re-review |
+| 2.3 | mps-time-slicing | Soft Sharing: MPS and Time-Slicing | 🔓 unlocked — win-first demo added; pending real p4d/A100 capture + re-review |
 | 2.4 | isolation | When Sharing Backfires: Isolation and Interference | 🔒 locked |
 
 Pipeline delivered: 5 writer subagents + 5 adversarial reviewers (4 per-section + 1 whole-Part),
