@@ -1,5 +1,5 @@
 ---
-title: "3.3 · Pack vs Spread: Fragmentation and the Bin-Packing Problem"
+title: "3.3 · Keeping Big Jobs Placeable: Fragmentation and Bin-Packing"
 description: "Free GPUs you can't use because they're scattered: how placement policy decides whether big jobs ever fit."
 date: "07/08/2026"
 ---
@@ -88,8 +88,21 @@ The default scheduler stays as-is (LeastAllocated / spread); pods opt into packi
 **Why:** the default `NodeResourcesFit` uses LeastAllocated, which balances load — it spreads the three 1-GPU pods one per node.
 
 ```bash
-kubectl apply -f - <<'YAML'   # small-a, small-b, small-c: each nvidia.com/gpu: 1, default scheduler
-...three 1-GPU pods...
+kubectl apply -f - <<'YAML'
+apiVersion: v1
+kind: Pod
+metadata: { name: small-a, labels: { app: small } }
+spec: { containers: [{ name: c, image: registry.k8s.io/pause:3.10, resources: { limits: { nvidia.com/gpu: "1" } } }] }
+---
+apiVersion: v1
+kind: Pod
+metadata: { name: small-b, labels: { app: small } }
+spec: { containers: [{ name: c, image: registry.k8s.io/pause:3.10, resources: { limits: { nvidia.com/gpu: "1" } } }] }
+---
+apiVersion: v1
+kind: Pod
+metadata: { name: small-c, labels: { app: small } }
+spec: { containers: [{ name: c, image: registry.k8s.io/pause:3.10, resources: { limits: { nvidia.com/gpu: "1" } } }] }
 YAML
 kubectl get pods -o wide | grep small
 ```
@@ -107,8 +120,11 @@ One pod per node. Three GPUs used, three free — but the free ones are scattere
 **Why:** the job needs two GPUs on a single node; every node has only one free.
 
 ```bash
-kubectl apply -f - <<'YAML'   # big-2gpu: nvidia.com/gpu: 2, default scheduler
-...one 2-GPU pod...
+kubectl apply -f - <<'YAML'
+apiVersion: v1
+kind: Pod
+metadata: { name: big-2gpu }
+spec: { containers: [{ name: c, image: registry.k8s.io/pause:3.10, resources: { limits: { nvidia.com/gpu: "2" } } }] }
 YAML
 kubectl get pod big-2gpu
 kubectl get event --field-selector involvedObject.name=big-2gpu | grep FailedScheduling
@@ -129,7 +145,22 @@ Half the cluster's GPUs are free and the job is still rejected — fragmentation
 
 ```bash
 kubectl delete pod small-a small-b small-c big-2gpu
-# recreate small-a/b/c with schedulerName: pack-scheduler
+kubectl apply -f - <<'YAML'
+apiVersion: v1
+kind: Pod
+metadata: { name: small-a, labels: { app: small } }
+spec: { schedulerName: pack-scheduler, containers: [{ name: c, image: registry.k8s.io/pause:3.10, resources: { limits: { nvidia.com/gpu: "1" } } }] }
+---
+apiVersion: v1
+kind: Pod
+metadata: { name: small-b, labels: { app: small } }
+spec: { schedulerName: pack-scheduler, containers: [{ name: c, image: registry.k8s.io/pause:3.10, resources: { limits: { nvidia.com/gpu: "1" } } }] }
+---
+apiVersion: v1
+kind: Pod
+metadata: { name: small-c, labels: { app: small } }
+spec: { schedulerName: pack-scheduler, containers: [{ name: c, image: registry.k8s.io/pause:3.10, resources: { limits: { nvidia.com/gpu: "1" } } }] }
+YAML
 kubectl get pods -o wide | grep small
 ```
 
@@ -140,7 +171,12 @@ small-c   Running   sched-demo-worker2    # worker3 left entirely free
 ```
 
 ```bash
-# recreate big-2gpu (schedulerName: pack-scheduler)
+kubectl apply -f - <<'YAML'
+apiVersion: v1
+kind: Pod
+metadata: { name: big-2gpu }
+spec: { schedulerName: pack-scheduler, containers: [{ name: c, image: registry.k8s.io/pause:3.10, resources: { limits: { nvidia.com/gpu: "2" } } }] }
+YAML
 kubectl get pod big-2gpu -o wide
 ```
 

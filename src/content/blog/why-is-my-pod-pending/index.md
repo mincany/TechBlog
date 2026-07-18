@@ -1,33 +1,28 @@
 ---
 title: "0.2 · Why Is My Pod Stuck Pending? Looking into the failure path"
-description: "The most common — and most expensive — GPU cluster question. The same 'Pending' can come from any of the four layers; here's how to find which one, before you waste money on the wrong fix."
+description: "The same 'Pending' can come from any of the four layers. The scheduler often prints the same line for all of them, so the message alone won't tell you which one is broken."
 date: "07/01/2026"
 ---
 
-This is the second post in a series on GPU capacity and scheduling. [0.1](/blog/four-layer-capacity-model) drew the map — a GPU cluster as four stacked layers. This post puts the map to work on the single most common thing anyone ever says about a GPU cluster: *"my pod is stuck Pending."*
+This is the second post in a series on GPU capacity and scheduling. [0.1](/blog/four-layer-capacity-model) drew the map. This post puts it to work on the single most common thing anyone says about a GPU cluster: *"my pod is stuck Pending."*
 
 ## TL;DR
 
-`Pending` is one word for **four different problems**, one per layer:
+`Pending` is one word for **four different problems**, one per layer. The scheduler often prints the same line for several of them, so the message won't tell you which layer is broken. Each layer has a different fix at a different cost. A structured triage, one cheap read-only question per layer, separates them in under a minute.
 
-- **L1** — there's no GPU pool at all (no reservation, quota is zero).
-- **L2** — a node exists but isn't a schedulable, `Ready` node yet.
-- **L4** — the pod's request can never fit any node (asks for 8 GPUs, or an affinity rule that matches nothing).
-- **L3** — the GPUs are real and `Ready`, but they're all busy right now.
+## Motivation
 
-The catch: the scheduler often prints the **same line** — `Insufficient nvidia.com/gpu` — for several of these, so the message alone won't tell you which layer is broken. Each has a *different* fix at a *different* price, and one cheap follow-up question per layer tells them apart. Get it wrong and you can spend real money buying capacity you already had.
+`Pending` tells us that the scheduler has not placed a pod. It does not tell us why. The cluster may have no GPU capacity, a GPU node may be unusable, the request may be impossible for any node shape, or every suitable GPU may simply be busy.
 
-## Motivation: the cheap question before the expensive fix
+Those cases need different owners and different fixes. Before restarting an autoscaler, changing YAML, preempting work, or adding capacity, the first task is to identify the layer. The triage below does that with one read-only question per layer.
 
-No incident story here — this is foundational, and `Pending` is just the everyday symptom the four-layer map is most useful for. The pattern is real though: "my pod is Pending" sends three people in three directions at once. The capacity owner checks the reservation, the platform engineer restarts the autoscaler, the ML engineer re-reads their YAML — and only one of them is looking at the right layer. The point of this post is to spend thirty seconds finding *which* layer before anyone touches anything.
+## Prerequisites
 
-## Before we start
+You'll want to know roughly what a pod and a node are, and that a GPU is a requestable resource (`limits: nvidia.com/gpu`). Everything below runs on `kind` (Kubernetes inside Docker) with GPUs faked onto the nodes. No GPU hardware, no specific scheduler.
 
-You'll want to know roughly what a pod and a node are, and that a GPU is a *requestable* resource (`limits: nvidia.com/gpu`). Everything below runs on `kind` (Kubernetes inside Docker) with GPUs *faked* onto the nodes — no GPU hardware, no specific scheduler. By the end you should have a four-question triage you can run in about a minute.
+## The triage tree
 
-## The mental model: a triage tree
-
-When a pod is `Pending`, walk down — the first "no" is your layer. Each step is one cheap, read-only question:
+When a pod is `Pending`, walk down. The first "no" is your layer. Each step is one cheap, read-only question:
 
 ```
                           pod stuck Pending
@@ -53,45 +48,43 @@ When a pod is `Pending`, walk down — the first "no" is your layer. Each step i
         └──────────────────────────────────────────────────────┘
 ```
 
-**Why this order?** Each question is cheaper and more certain than the next. *Is there a GPU at all?* and *is the node usable?* are static facts you read straight off `kubectl get nodes` in one shot. *Could this pod ever fit?* is still static — just compare the request to what a node offers. Only the last question, contention, needs you to look at **live** cluster state (what's running right this second). It's also the only cause where the cluster is actually healthy and the fix *costs something* — wait, preempt, or buy more. So you rule out the cheap, structural causes first and conclude "it's just busy" only after the other three are out. Skip the order and you risk "fixing" contention by buying capacity you already had.
+**Why this order?** The first two questions are static facts you read off `kubectl get nodes` in one shot. The third is still static: compare the request to what a node offers. Only the last question needs live cluster state. It is the only cause where the existing cluster is healthy and the question is how to handle contention: wait, preempt, or add capacity. Rule out structural causes first; conclude "just busy" only after the other three are gone.
 
 | Layer | Cause of `Pending` | The one cheap question | What "no" tells you |
 |-------|--------------------|------------------------|---------------------|
-| **L1 capacity** | no pool at all | `get nodes`: any GPU anywhere? | nothing to schedule onto — you need capacity (or quota) |
-| **L2 provisioning** | node not `Ready`/schedulable | `get nodes`: `Ready`? `SchedulingDisabled`? | capacity exists but isn't usable yet — fix the node, not the pool |
-| **L4 workload** | request can't fit any node | request vs node capacity; selector | the YAML is wrong — no amount of capacity helps |
-| **L3 scheduling** | GPUs exist but all busy | `get pods -o wide`: others Running? | it's contention — wait, preempt, or add capacity |
+| **L1 capacity** | no pool at all | `get nodes`: any GPU anywhere? | nothing to schedule onto |
+| **L2 provisioning** | node not `Ready`/schedulable | `get nodes`: `Ready`? `SchedulingDisabled`? | capacity exists but isn't usable yet |
+| **L4 workload** | request can't fit any node | request vs node capacity; selector | the YAML is wrong |
+| **L3 scheduling** | GPUs exist but all busy | `get pods -o wide`: others Running? | contention: wait, preempt, or add capacity |
 
-## The four causes, walked
+## The four causes
 
-**L1 — no pool.** The cluster has no GPU to offer at all: no reservation has been turned into GPU-bearing nodes, or your quota is zero. In the cloud this is `InsufficientInstanceCapacity` / `ZONE_RESOURCE_POOL_EXHAUSTED` / quota 0. The tell is that `kubectl get nodes` shows **no GPU on any node** — there's nothing to grow onto. Fixing this means getting capacity; restarting things won't help.
+**L1: no pool.** The cluster has no GPU to offer at all. No reservation has been turned into GPU-bearing nodes, or your quota is zero. In the cloud this is `InsufficientInstanceCapacity` / `ZONE_RESOURCE_POOL_EXHAUSTED` / quota 0. The tell: `kubectl get nodes` shows no GPU on any node. Restarting things won't help; you need capacity.
 
-**L2 — no ready node.** Capacity exists, but the node carrying it isn't a usable `Ready` node *right now* — it's still booting, `NotReady`, cordoned, or draining, or its GPU device plugin hasn't advertised the GPUs yet. The GPU is "there" but the scheduler can't use it. The fix is at the node, not the pool.
+**L2: no ready node.** Capacity exists, but the node carrying it isn't usable right now. It's still booting, `NotReady`, cordoned, or draining, or the GPU device plugin hasn't advertised the GPUs yet. The GPU is "there" but the scheduler can't use it. The fix is at the node, not the pool.
 
-**L4 — impossible request.** The pod asks for something **no single node can ever satisfy**: 8 GPUs when the largest node has 1, or a `nodeSelector`/affinity that matches no node. This one stays `Pending` *even on a completely idle cluster* — which is exactly how you spot it. No amount of extra capacity fixes a request that can't fit; the YAML is the bug.
+**L4: impossible request.** The pod asks for something no single node can satisfy: 8 GPUs when the largest node has 1, or a `nodeSelector` that matches nothing. This stays `Pending` even on a completely idle cluster, which is exactly how you spot it. Adding more nodes of the same shape will not fix a request that cannot fit one node.
 
-**L3 — contention.** The honest case: GPUs exist, nodes are `Ready`, the request is reasonable — they're just all **busy**. Other pods are `Running` on the GPUs and yours waits its turn. This is the only one of the four where "add capacity," "wait," or "preempt something" are the right moves — and it's the one most often *mistaken* for L1.
+**L3: contention.** GPUs exist, nodes are `Ready`, the request is reasonable. They're all busy. Other pods are `Running` on the GPUs and yours waits its turn. **This is the case where existing capacity is healthy but insufficient for current demand.** Waiting, preempting lower-priority work, or adding capacity can resolve it. It is also the case most often mistaken for L1.
 
-## One concept you need first before the demo: taints
+## Taints (needed for the demo output)
 
-The scheduler messages below are full of the word *taint*, so it's worth thirty seconds up front.
+The scheduler messages below mention taints, so a quick primer.
 
-A **taint** is a mark on a *node* that says "don't put pods here unless they explicitly say they're OK with it." A pod opts in by carrying a matching **toleration**. No toleration → the scheduler refuses to place that pod on that node. Taints are how Kubernetes keeps certain nodes clear of ordinary work.
+A **taint** is a mark on a node that says "don't place pods here unless they carry a matching toleration." Two taints appear in this post:
 
-Two taints show up in this post, and both are set for you *implicitly* — which is exactly why they're confusing the first time:
+- **Control-plane role taint.** The control-plane node is automatically tainted `node-role.kubernetes.io/control-plane:NoSchedule`. Our GPU pods don't tolerate it, so the control-plane is always excluded. That is the `1 node(s) had untolerated taint(s)` clause in every message below.
+- **Cordon taint.** `kubectl cordon <node>` adds `node.kubernetes.io/unschedulable:NoSchedule` and the node shows `Ready,SchedulingDisabled`. New pods won't be placed there; running pods stay put. `kubectl uncordon` removes it.
 
-- **A node's role can imply a taint.** The control-plane node is automatically tainted `node-role.kubernetes.io/control-plane:NoSchedule` so that ordinary workloads stay off it. Our GPU pods don't tolerate that taint, so the control-plane is *always* excluded for them. That is the `1 node(s) had untolerated taint(s)` clause you'll see in every message below — that one node is the control-plane.
-- **`cordon` sets a taint.** `kubectl cordon <node>` marks a node unschedulable; under the hood it adds the taint `node.kubernetes.io/unschedulable:NoSchedule` and the node starts showing as `Ready,SchedulingDisabled`. New pods won't be placed there (pods already running stay put). `kubectl uncordon <node>` removes it. This is the everyday way operators take a node out of rotation without killing what's on it.
-
-So when the scheduler says `0/N nodes are available: ...`, it is listing **every reason each node was ruled out for the one pod it's trying to place** — untolerated taints included. Keep that in mind: those counts are always *about a single pending pod*, not a tally of how many pods failed.
+When the scheduler says `0/N nodes are available: ...`, it lists every reason each node was ruled out **for the one pod it's trying to place**. Those counts are per-pod, not aggregate.
 
 ## Demo: break a cluster four ways
 
-We'll manufacture each cause on one small cluster, in the **same order you'd triage them** — no pool (L1), no usable node (L2), impossible request (L4), real contention (L3). Every command and output below is from a real run (`kind` v0.32, Kubernetes v1.36.1); GPUs are faked onto the nodes, so this needs no hardware.
+We manufacture each cause on one small cluster, in triage order: no pool (L1), no usable node (L2), impossible request (L4), real contention (L3). Every command and output below is from a real run (kind v0.32, Kubernetes v1.36.1); GPUs are faked onto the nodes, so no hardware is needed.
 
-Every scheduler message below starts with `1 node(s) had untolerated taint(s)` — that's the control-plane, excluded by its role taint (see the primer above). The clause that *changes* between causes is the rest of the line, so that's what to read. (I've trimmed the trailing `preemption: ...` text to `…` for width.)
+Every scheduler message starts with `1 node(s) had untolerated taint(s)` (the control-plane, excluded by its role taint). The clause that changes between causes is the rest of the line. Trailing `preemption: ...` text is trimmed to `…` for width.
 
-**Setup — a 3-node cluster (1 control-plane + 2 workers).**
+**Setup: a 3-node cluster (1 control-plane + 2 workers).**
 
 ```bash
 cat > kind-pending.yaml <<'EOF'
@@ -113,7 +106,7 @@ node/pending-worker condition met
 node/pending-worker2 condition met
 ```
 
-**Cause L1 — no GPU anywhere.** Fresh `kind` nodes advertise no GPUs, so this *is* the "no pool" state. Check, then submit a pod that wants one GPU:
+**L1: no GPU anywhere.** Fresh nodes advertise no GPUs, so this already *is* the "no pool" state:
 
 ```bash
 kubectl get nodes -o 'custom-columns=NODE:.metadata.name,GPU:.status.capacity.nvidia\.com/gpu'
@@ -143,9 +136,9 @@ Events:
   Warning  FailedScheduling  4s    default-scheduler  0/3 nodes are available: 1 node(s) had untolerated taint(s), 2 Insufficient nvidia.com/gpu. …
 ```
 
-The node table is the whole story: `GPU` is `<none>` everywhere. There is nothing to schedule onto. Remember the message — `2 Insufficient nvidia.com/gpu` — because you'll see it again for completely different reasons.
+The node table tells the story: `GPU` is `<none>` everywhere. There is nothing to schedule onto. Remember the message, `2 Insufficient nvidia.com/gpu`, because you'll see it again for different reasons.
 
-**Cause L2 — node not schedulable.** Now give each worker a GPU (standing in for the device plugin advertising it once the reserved instance is up), then `cordon` both — capacity exists, but the nodes won't accept work:
+**L2: node not schedulable.** Give each worker a GPU (standing in for the device plugin), then cordon both. Capacity exists, but the nodes won't accept work:
 
 ```bash
 for n in pending-worker pending-worker2; do
@@ -181,14 +174,14 @@ Events:
   Warning  FailedScheduling  4s    default-scheduler  0/3 nodes are available: 1 node(s) had untolerated taint(s), 2 node(s) were unschedulable. …
 ```
 
-A *different* message — `2 node(s) were unschedulable`. That's the cordon taint talking: `kubectl get nodes` shows the two workers as `Ready,SchedulingDisabled`, so the scheduler skips them even though their GPUs exist. The capacity is real; the nodes just aren't in rotation. Put them back so the next two causes have somewhere to run, and clean up this pod:
+A different message: `2 node(s) were unschedulable`. The two workers show `Ready,SchedulingDisabled`, so the scheduler skips them even though their GPUs exist. Put them back and clean up:
 
 ```bash
 kubectl uncordon pending-worker pending-worker2
 kubectl delete pod l2-unschedulable
 ```
 
-**Cause L4 — a request that can't fit.** The cluster is now idle with two free GPUs. Ask for 8 GPUs when no node has more than 1:
+**L4: a request that can't fit.** The cluster is idle with two free GPUs. Ask for 8 GPUs when no node has more than 1:
 
 ```bash
 kubectl apply -f - <<'EOF'
@@ -212,7 +205,7 @@ Events:
   Warning  FailedScheduling  4s    default-scheduler  0/3 nodes are available: 1 node(s) had untolerated taint(s), 2 Insufficient nvidia.com/gpu. …
 ```
 
-`2 Insufficient nvidia.com/gpu` *again* — the same line L1 printed with no GPUs at all. But the cluster is completely idle, and this pod will stay `Pending` forever: nothing is busy, the request itself just can't fit on a 1-GPU node. The "idle but still Pending" is the tell. A different flavor of impossible request — an affinity rule matching no node — announces itself more clearly:
+`2 Insufficient nvidia.com/gpu` again, the same line L1 printed with no GPUs at all. But the cluster is completely idle, and this pod will stay `Pending` forever: the request can't fit on a 1-GPU node. A different flavor of impossible request (bad affinity) announces itself more clearly:
 
 ```bash
 kubectl apply -f - <<'EOF'
@@ -237,13 +230,13 @@ Events:
   Warning  FailedScheduling  5s    default-scheduler  0/3 nodes are available: 1 node(s) had untolerated taint(s), 2 node(s) didn't match Pod's node affinity/selector. …
 ```
 
-Clear these and move to the last cause:
+Clean up:
 
 ```bash
 kubectl delete pod l4-too-big l4-bad-affinity
 ```
 
-**Cause L3 — contention.** Both GPUs are real, `Ready`, and free. Submit three one-GPU pods for two GPUs:
+**L3: contention.** Both GPUs are real, `Ready`, and free. Submit three one-GPU pods for two GPUs:
 
 ```bash
 for p in trn-a trn-b trn-c; do
@@ -275,40 +268,40 @@ Events:
   Warning  FailedScheduling  11s   default-scheduler  0/3 nodes are available: 1 node(s) had untolerated taint(s), 2 Insufficient nvidia.com/gpu. …
 ```
 
-Read the two outputs together, because this is where people get confused:
+Two things to read together:
 
-- `kubectl get pods -o wide` is the **outcome**: `trn-a` and `trn-b` each grabbed a GPU and are `Running`; only `trn-c` is `Pending`. Scheduling did **not** fail across the board — two of the three pods placed fine.
-- The `Events` block is from `describe pod trn-c` — it's the scheduler explaining why it couldn't place **`trn-c` specifically**. `0/3 nodes are available` means *for this one pod*, none of the three nodes works: the control-plane is off-limits (its role taint), and each of the two workers has its single GPU already taken by `trn-a`/`trn-b`. A whole GPU is reserved per pod — stock Kubernetes doesn't split one GPU across pods (that needs MIG / MPS / time-slicing, a later post) — so two pods fill two GPUs and the third has nowhere to go.
+- `kubectl get pods -o wide` shows the outcome: `trn-a` and `trn-b` each grabbed a GPU and are `Running`. Only `trn-c` is `Pending`. Scheduling didn't fail across the board.
+- The `Events` block is from `describe pod trn-c`. It explains why the scheduler couldn't place **this one pod**: the control-plane is off-limits (role taint), and each worker's single GPU is already taken. A whole GPU is reserved per pod (stock Kubernetes doesn't split one GPU across pods; that needs MIG/MPS/time-slicing, a later post), so two pods fill two GPUs and the third has nowhere to go.
 
-And notice the line again: `2 Insufficient nvidia.com/gpu` — *identical* to L1, where there were no GPUs at all. The only thing that tells them apart is `get pods`: here the GPUs exist and are busy; in L1 they were absent.
+The line is `2 Insufficient nvidia.com/gpu`, identical to L1. The only thing that tells them apart is `get pods -o wide`: here the GPUs exist and are busy; in L1 they were absent.
 
 ```bash
-kind delete cluster --name pending     # clean up
+kind delete cluster --name pending
 ```
 
-**What you just watched, in triage order:**
+**Summary of all four causes:**
 
 | Cause | What we did | What the scheduler said |
 |---|---|---|
 | **L1** no pool | submit 1-GPU pod, no GPUs anywhere | `2 Insufficient nvidia.com/gpu` |
-| **L2** node not schedulable | `cordon` the GPU nodes | `2 node(s) were unschedulable` |
+| **L2** not schedulable | `cordon` the GPU nodes | `2 node(s) were unschedulable` |
 | **L4** impossible request | ask for 8 GPUs / bad selector (idle cluster) | `2 Insufficient nvidia.com/gpu` / `didn't match Pod's node affinity/selector` |
 | **L3** contention | 3 one-GPU pods, 2 GPUs, both busy | `2 Insufficient nvidia.com/gpu` |
 
-Three of the four printed the same `Insufficient nvidia.com/gpu` line. The message tells you the scheduler couldn't place the pod — it does *not* tell you why. The triage tree does: one read-only `get nodes` / `get pods -o wide` question per layer separates causes the message itself blurs together.
+Three of the four printed the same `Insufficient nvidia.com/gpu` line. The message tells you the scheduler couldn't place the pod. It does not tell you why. The triage tree does: one read-only question per layer separates causes the message blurs together.
 
-## What it buys you: the meter never stops
+## Why this matters: the meter never stops
 
-GPU capacity bills by the hour whether or not anything runs on it. A reserved pool — or even one high-end accelerator — costs the same sitting at 0% as it does flat out; idle time is just money you've already committed and gotten nothing back for. So the real price of a `Pending` pod isn't the stuck job. It's the capacity sitting underneath it, earning nothing, for every minute you spend guessing why.
+GPU capacity bills by the hour whether or not anything runs on it. A reserved pool costs the same sitting idle as it does flat out. So the real price of a `Pending` pod isn't the stuck job. It's the capacity underneath it, earning nothing, for every minute you spend guessing which layer is broken.
 
-That's what a structured triage actually buys: it shortens that meter-running minute, *and* it stops you paying twice. The expensive way to debug `Pending` is to guess the layer. Read L3 (busy GPUs) as L1 (no GPUs) — easy, since they print the same line — and you "fix" it by buying more capacity you already had, so now you're paying for two idle pools instead of one. Read L1 as L3 and you spend an afternoon tuning a scheduler that was never the bottleneck while the reserved pool keeps burning. A defined four-question pass turns *"something's wrong, page everyone"* into *"it's L2, the node's cordoned"* in under a minute — and that minute matters precisely because the bill doesn't pause while you think.
+Misidentifying the layer is how you pay twice. Read L3 (busy GPUs) as L1 (no GPUs), and you buy capacity you already had, paying for two idle pools instead of one. Read L1 as L3 and you spend an afternoon tuning a scheduler that was never the bottleneck while the reserved pool keeps burning.
 
-This is the seam from [0.1](/blog/four-layer-capacity-model) showing its teeth: a paid reservation can sit `Pending` at L1 — billed, never turned into a schedulable node — while the capacity team's dashboard says "active, $X/hr," the platform team's says "N pods Pending," and *no* dashboard shows the idle dollars in between. Naming the stuck layer in a minute, instead of arguing for an hour, is the cheapest money-saving move you have before you've changed anything at all.
+This is the seam from [0.1](/blog/four-layer-capacity-model): **a paid reservation can sit billed at L1, never turned into a schedulable node**, while the capacity team's dashboard says "active, $X/hr," the platform team's says "N pods Pending," and no dashboard shows the idle dollars in between. Naming the stuck layer in a minute is the cheapest money-saving move you have before you've changed anything.
 
-## Recap
+## What's next
 
-`Pending` is four problems wearing one word — no pool (L1), no ready node (L2), an impossible request (L4), or plain contention (L3) — and the scheduler's message often can't tell them apart. Walk the tree in order, ask the one cheap question at each layer, and you'll know which one you have before you spend anything fixing the wrong one. The next posts go down into each layer in turn.
+The next posts go down into each layer in turn.
 
 ---
 
-*This is a personal blog — opinions are mine, not my employer's, and everything here is based on publicly documented features.*
+*This is a personal blog. Opinions are mine, not my employer's, and everything here is based on publicly documented features.*

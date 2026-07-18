@@ -1,5 +1,5 @@
 ---
-title: "3.4 · Placement That Respects Topology"
+title: "3.4 · Lower Communication Cost for Multi-GPU Jobs: Topology-Aware Placement"
 description: "Where a job's ranks land on the fabric decides whether collectives ride NVLink or crawl across spine switches — topology-aware scheduling claims the fast path."
 date: "07/09/2026"
 ---
@@ -27,25 +27,50 @@ The scheduler scores a candidate placement by how much of the job's communicatio
 
 ## Why it matters
 
-This is the workload-placement mirror of [1.3](/blog/topology-nvlink) and [1.5](/blog/inter-node-fabric).
+This is the workload-placement mirror of [1.3](/blog/topology-nvlink) and [1.5](/blog/inter-node-fabric): 1.3 covered the fast lane inside a node, 1.5 the switch tree between nodes. Here those two facts become a placement decision, and the cost of ignoring them is something you can compute.
 
-1.3 established: eight H100s inside a p5.48xlarge talk over NVLink at ~900 GB/s per GPU — an order of magnitude faster than the PCIe host bus. 1.5 established: once traffic leaves the node it hits EFA at ~400 GB/s aggregate, and every additional switch hop adds latency. The canonical contrast: a representative all-reduce completes in ~50 ms when ranks share an NVLink domain versus ~710 ms when forced across PCIe and multiple hops (illustrative — the point is the mechanism, not a benchmark).
+**The structure.** The reference cluster: eight p5.48xlarge nodes (8 GPUs each, 64 GPUs total) on a two-leaf spine tree.
 
-Distributed training is communication-bound. Every iteration ends with a collective — an all-reduce that exchanges gradients across all ranks — and that collective runs at the speed of the *slowest* link any two communicating ranks share. Placement decides which links those are.
+```
+                 spine
+               /       \
+           leaf1        leaf2
+         / | | \       / | | \
+       n1 n2 n3 n4   n5 n6 n7 n8        each n = one p5.48xlarge (8 GPUs)
+```
 
-Take a 16-GPU job on the reference cluster:
+Three tiers, three bandwidths (the 1.3/1.5 numbers): GPU↔GPU inside a node rides NVLink at ~900 GB/s per GPU; node↔node traffic leaves through the node's EFA NICs at ~400 GB/s aggregate per node; cross-spine paths run at the same wire rate but are two hops longer and typically oversubscribed, so the effective share per flow drops further.
 
-**Placement A — 2 full nodes (16 GPUs on 2 × p5.48xlarge).** Within each node, 8 ranks talk over NVLink at ~900 GB/s. Only the reduced cross-node step traverses EFA at ~400 GB/s. Most traffic stays on the fast lane; the fabric is barely a tax.
+**The hops.** Count the path between any two ranks:
 
-**Placement B — scattered 1–2 GPUs across 8+ nodes.** Now nearly every rank-to-rank exchange crosses EFA and, worse, multiple switch hops. The collective runs at the slowest tier for the whole job. The bandwidth ratio alone (~900 vs ~400 GB/s) makes the collective step roughly 2× slower; layered switch-hop latency pushes a communication-heavy iteration into the 2–3× range. Same 16 GPUs, same job — an illustrative 2–3× slower wall-clock, purely from where the ranks landed. Nothing in the scheduler output or job logs flags it: the job reports Running, every pod Scheduled, and MFU is the only breadcrumb.
+| Rank pair | Path | Hops |
+|---|---|---|
+| Same node | NVLink/NVSwitch | 1 |
+| Same leaf | node → leaf → node | 2 |
+| Cross spine | node → leaf → spine → leaf → node | 4 |
 
-Both placements *fit*. Both pass Filter, both satisfy the gang. Only the topology-aware Score separates the fast lane from the fallback.
+**The two placements.** A 16-GPU job (16 one-GPU ranks) can land on this cluster two ways:
 
-## When topology is the bottleneck
+```
+Placement A (packed):     n1 ████████  n2 ████████              2 full nodes, same leaf
+Placement B (scattered):  n1 ██ n2 ██ n3 ██ n4 ██ n5 ██ ...     2 ranks on each of 8 nodes,
+                                                                 spanning both leaves
+```
 
-Communication-heavy jobs feel it most — tensor-parallel is the chattiest, exchanging activations every layer, and is the least tolerant of a slow link. The failure is **invisible**: no crash, no `Pending` pod, no error in any log. The job runs. It just runs at a fraction of its speed, and the only symptom is a quietly low MFU and a training run that takes longer than the GPU count says it should.
+Both are 16 GPUs. Both pass Filter, both satisfy the gang. The difference only shows up when the ranks talk.
 
-The scheduler can only avoid this if it *knows* the fabric. That means topology labels — node, zone, rack/switch, NVLink domain — attached to nodes and fed to a scoring plugin. Without them the scheduler places blind: it satisfies the count and ignores the connectivity.
+**The calculation.** Every training iteration ends with an all-reduce of the gradients. For a ring all-reduce over N ranks moving G bytes, each rank pushes 2G(N−1)/N through its ring links, and the collective finishes at the pace of the *slowest* link in the ring. Take the series' running 13B-parameter model in BF16: G = 26 GB of gradients.
+
+Calibration first: 8 ranks inside one node, every link NVLink. 2 × 26 GB × (7/8) / 900 GB/s ≈ **50 ms** — the canonical intra-node number from 1.3, falling out of the same formula.
+
+Now the 16-rank job, per-rank traffic 2 × 26 GB × (15/16) ≈ 49 GB:
+
+- **Placement A.** Order the ring to walk all of n1's GPUs, then all of n2's (NCCL does this on its own — it knows node locality). 14 of the 16 ring links are NVLink; only 2 cross between the nodes, one in each direction, and each crossing gets the node's full ~400 GB/s. Slowest link: 400 GB/s. Time ≈ 49 / 400 ≈ **120 ms**.
+- **Placement B.** Same ring discipline, but with 2 ranks per node the ring now crosses nodes 8 times, and because the job spans both leaves, some of those crossings traverse the spine — the 4-hop path in the table. Spine capacity is what makes this expensive: leaf-spine fabrics are typically oversubscribed, so a spine crossing gets a fraction of the leaf-level bandwidth. At 2:1 the worst link delivers ~200 GB/s → 49 / 200 ≈ **245 ms**; at 4:1 it's ~100 GB/s → **490 ms**. The collective finishes at the pace of that worst link, so the 14 fast links don't help.
+
+Same 16 GPUs, same job, same bytes: 120 ms versus 245–490 ms of communication per iteration, a 2–4× gap decided entirely by where the ranks landed (compute overlap absorbs some of it, which is why 2–3× wall-clock is the range you see quoted). Nothing in the scheduler output or job logs distinguishes the two placements; the job reports Running either way, and a quietly low MFU is the only symptom. How hard the gap bites scales with communication frequency: tensor-parallel exchanges activations every layer and tolerates a slow link least.
+
+In practice, the reservation layer ([0.1](/blog/four-layer-capacity-model)'s layer 1) can buy you the outer bound. GPU capacity sold as a colocated block (EC2 Capacity Blocks, carved from a single EC2 UltraCluster, are the public example) is placed under one spine by the provider, so the cross-spine worst case above cannot occur inside the block. What remains is the structure beneath it: same node versus same leaf. Providers expose that hierarchy through a topology API (`DescribeInstanceTopology`, or `DescribeCapacityReservationTopology` scoped to a reservation), and Kubernetes on EKS surfaces it as node labels. A topology-aware scheduler, or your own rank-assignment logic, reads that hierarchy to keep the chattiest ranks on the fewest hops.
 
 ## Demo: the same job, two placements, on real hardware
 
@@ -114,6 +139,8 @@ NCCL_DEBUG=WARN torchrun --nnodes=2 --node_rank=0 --nproc_per_node=4 \
 NCCL_DEBUG=WARN torchrun --nnodes=2 --node_rank=1 --nproc_per_node=4 \
   --master_addr=$MASTER --master_port=29500 ~/allreduce.py
 ```
+
+Nothing here auto-discovers the cluster; you declare it. `--nnodes=2` says the world spans two machines and `--node_rank` tells each launcher which one it is, which is why the command runs once per node. `--master_addr` is only a rendezvous point: all 8 processes connect to node 0's IP, receive global ranks 0–7, and exchange addresses there. Each launcher starts 4 processes on its own machine, one per GPU. NCCL then picks the transport per rank pair — same-node pairs ride NVLink, cross-node pairs go out over EFA — which is where the placement cost physically lands.
 
 ```
 world=8  msg=256MB  Y.YY ms/iter  algbw=YYY.Y GB/s  busbw=YYY.Y GB/s     # pending real run — expect materially lower busbw than Step 1

@@ -1,5 +1,5 @@
 ---
-title: "2.3 · Soft Sharing: MPS and Time-Slicing"
+title: "2.3 · Sharing in Time: MPS and Time-Slicing"
 description: "Pack several sub-saturating jobs onto one GPU — MPS runs them truly concurrently, time-slicing rotates turns — with a step-by-step MPS-vs-time-slicing demo, then the shared-fault-domain cost."
 date: "07/04/2026"
 ---

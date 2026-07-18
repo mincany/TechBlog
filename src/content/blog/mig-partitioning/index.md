@@ -1,5 +1,5 @@
 ---
-title: "2.2 · Hard Partitions: MIG"
+title: "2.2 · Sharing in Space: MIG"
 description: "Carve one physical H100 into isolated instances so two workloads run at once on a card a single job would hog — a step-by-step MIG demo, then the rigidity cost."
 date: "07/03/2026"
 ---

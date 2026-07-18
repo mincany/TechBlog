@@ -1,5 +1,5 @@
 ---
-title: "3.2 · All-or-Nothing: Gang Scheduling for Distributed Jobs"
+title: "3.2 · Whole-Job Placement for Distributed Training: Gang Scheduling"
 description: "A distributed training job needs every piece placed simultaneously — partial placement deadlocks and wastes every GPU it grabbed."
 date: "07/07/2026"
 ---
@@ -21,17 +21,9 @@ Gang scheduling (also called co-scheduling) is an admission gate in front of bin
 
 The plain kube-scheduler doesn't have this concept. It processes pods from the priority queue independently. If a 16-pod job enters the queue, those 16 pods compete with every other pending pod for available slots, one binding at a time. There's no mechanism to say "hold these 16 bindings until all 16 can succeed."
 
-| Dimension | Independent binding (default) | Gang binding |
-|-----------|------------------------------|--------------|
-| Unit of decision | Single pod | PodGroup (N pods) |
-| Partial placement | Allowed — some bound, some pending | Forbidden — all or none |
-| Deadlock risk | High under contention | Eliminated by design |
-| GPU waste on partial | N×(GPU-hours while waiting) | Zero — nothing held |
-| Implementation | Built into kube-scheduler | Requires Volcano PodGroup, Kueue, or the Coscheduling plugin |
-
 ## Why it matters
 
-The failure mode isn't theoretical. Consider two distributed training jobs each needing 16 GPUs (2 × p5.48xlarge), and a cluster with 24 free GPUs (3 nodes).
+The failure mode isn't theoretical. Consider a cluster of three p5.48xlarge nodes — 24 GPUs, all free. Each node is one EC2 instance that was already launched and joined the cluster; that provisioning happened at layers 1–2 ([0.1](/blog/four-layer-capacity-model)), and the scheduler only places pods within this fixed pool. Now two distributed training jobs arrive, each needing 16 GPUs: 16 one-GPU pods, two nodes' worth, drawn from the shared pool — jobs consume GPUs, not instances, and one job's pods can span nodes.
 
 **Greedy independent binding** (both jobs submitted together at equal priority, so their pods interleave in the queue and the scheduler alternates bindings — the split is symmetric only because neither job's pods dequeue as an uninterrupted block):
 1. Job A's first 12 pods land across 2 nodes (one full, half of another) — 12 GPUs.
@@ -42,6 +34,16 @@ The failure mode isn't theoretical. Consider two distributed training jobs each 
 Result: **resource deadlock.** 24 GPUs are allocated, 24 GPUs are idle, and zero useful work is happening — each job holds enough to block the other and not enough to run. Neither yields, because from each job's point of view its pods are healthy and waiting. Only an operator killing one job breaks the tie.
 
 Even a job that *isn't* deadlocked pays. A distributed training step is all-reduce-coupled ([1.3](/blog/topology-nvlink)): every worker exchanges gradients with every other worker before the next step begins. A worker with no peers can't make progress — it blocks on a collective that never completes, holding its GPU at 0% useful utilization while the meter runs.
+
+To summarize, the two policies just contrasted — the default scheduler binding pods independently versus gang binding the group as a unit:
+
+| Dimension | Independent binding (default) | Gang binding |
+|-----------|------------------------------|--------------|
+| Unit of decision | Single pod | PodGroup (N pods) |
+| Partial placement | Allowed — some bound, some pending | Forbidden — all or none |
+| Deadlock risk | High under contention | Eliminated by design |
+| GPU waste on partial | Every bound-but-blocked GPU burns hours | Zero — nothing held |
+| Implementation | Built into kube-scheduler | Requires Volcano PodGroup, Kueue, or the Coscheduling plugin |
 
 ## The gang fix
 
@@ -98,8 +100,18 @@ apiVersion: v1
 kind: Pod
 metadata: { name: blocker-1, labels: { app: blocker } }
 spec: { containers: [{ name: c, image: registry.k8s.io/pause:3.10, resources: { limits: { nvidia.com/gpu: "1" } } }] }
+---
+apiVersion: v1
+kind: Pod
+metadata: { name: blocker-2, labels: { app: blocker } }
+spec: { containers: [{ name: c, image: registry.k8s.io/pause:3.10, resources: { limits: { nvidia.com/gpu: "1" } } }] }
+---
+apiVersion: v1
+kind: Pod
+metadata: { name: blocker-3, labels: { app: blocker } }
+spec: { containers: [{ name: c, image: registry.k8s.io/pause:3.10, resources: { limits: { nvidia.com/gpu: "1" } } }] }
 YAML
-# ...blocker-2 and blocker-3 identical → 3 GPUs held, 3 free
+# 3 GPUs held, 3 free
 ```
 
 ### Step 2 — the problem: a 4-pod gang on the default scheduler
@@ -107,9 +119,13 @@ YAML
 **Why:** the default scheduler binds pods independently, so it will place whatever fits and leave the rest Pending — with no notion that the four pods are one job.
 
 ```bash
-kubectl apply -f - <<'YAML'   # train-0..train-3, each requesting nvidia.com/gpu: 1
-...four pods, no schedulerName (default), labeled job=train-default...
+for i in 0 1 2 3; do kubectl apply -f - <<YAML
+apiVersion: v1
+kind: Pod
+metadata: { name: train-$i, labels: { job: train-default } }
+spec: { containers: [{ name: c, image: registry.k8s.io/pause:3.10, resources: { limits: { nvidia.com/gpu: "1" } } }] }
 YAML
+done
 kubectl get pods -l job=train-default -o wide
 ```
 
@@ -134,10 +150,19 @@ apiVersion: scheduling.volcano.sh/v1beta1
 kind: PodGroup
 metadata: { name: train-gang }
 spec: { minMember: 4 }
----
-# vtrain-0..vtrain-3: schedulerName: volcano,
-# annotation scheduling.k8s.io/group-name: train-gang, each nvidia.com/gpu: 1
 YAML
+for i in 0 1 2 3; do kubectl apply -f - <<YAML
+apiVersion: v1
+kind: Pod
+metadata:
+  name: vtrain-$i
+  labels: { job: train-gang }
+  annotations: { scheduling.k8s.io/group-name: train-gang }
+spec:
+  schedulerName: volcano
+  containers: [{ name: c, image: registry.k8s.io/pause:3.10, resources: { limits: { nvidia.com/gpu: "1" } } }]
+YAML
+done
 kubectl get pods -l job=train-gang
 kubectl get podgroup train-gang -o jsonpath='{.status.phase}'
 ```
