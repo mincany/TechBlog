@@ -6,13 +6,13 @@ import ArrowCard from "@components/ArrowCard.astro";
 import { BLOG } from "@consts";
 
 const PART_TITLES: Record<string, string> = {
-  "0": "Foundations",
-  "1": "Anatomy of a Unit of Compute",
-  "2": "GPU Sharing",
-  "3": "Job Scheduling",
-  "4": "Cluster Sharing",
-  "5": "Failure Recovery",
-  "6": "Measurement & Economics",
+  "0": "Foundations: The Utilization Problem and a Map of the Stack",
+  "1": "Anatomy of a Compute Unit: What One GPU Server Gives You",
+  "2": "Sharing Within One GPU: Small Jobs Like Inference",
+  "3": "Placing Jobs Across the Cluster: Multi-GPU Training",
+  "4": "Sharing the Cluster Across Teams and Time: Reclaiming Idle Capacity",
+  "5": "Failure Recovery: Keeping Placed Work Alive",
+  "6": "Measurement and Economics: What Utilization Is and What Idle Costs",
   "7": "Synthesis",
 };
 
@@ -53,7 +53,7 @@ for (const post of data) {
           A place to share and bookmark notes on GPU scheduling, capacity planning for AI workloads, and the infrastructure behind large-scale ML.
         </p>
         <p class="text-sm text-black/60 dark:text-white/60">
-          I build AI infrastructure — the capacity layer — @AWS, previously @Apple.
+          All opinions are my own and do not represent those of my employer.
         </p>
       </div>
       <div class="space-y-8">
